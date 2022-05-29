@@ -1,0 +1,476 @@
+---
+title: "MOTA_PCA_GUT_code"
+author: "Pierre FOUCAULT"
+date: "12/8/2021"
+output: html_document
+---
+
+Welcome to the Multivariate Omics Trajectory Analysis (MOTA) code.
+
+## PACKAGES
+##|
+
+To begin, let's load all the necessary packages 
+
+```{r}
+library(phyloseq)
+library(qiime2R)
+library(ggplot2)
+library(ggpubr)
+library(tidyverse)
+library(dplyr)
+library(mixOmics)
+library(readr)
+library(stringr)
+
+#If not already downloaded
+#BiocManager::install("_____")
+```
+
+## LOAD DATA
+##|
+
+Then let's load the data associated with the manuscript.
+Two datasets are expected, two  mixOmics-friendly dataset, one for the micorbiome (metabarcoding, 16S rRNA) data and the other for the metabolome (mass spectrometry, LC-MS) data.
+
+```{r}
+#### Microbiome data ####
+
+Gadn<-read_delim("gut_adn_mixomics_2.csv",";", escape_double = FALSE, trim_ws = TRUE) %>%
+  remove_rownames %>% column_to_rownames(var="Names") #View(Gadn)
+
+MetadataGUT_log<-read_delim("MetadataGUT_D.csv",";", escape_double = FALSE, trim_ws = TRUE) %>%
+  remove_rownames %>% column_to_rownames(var="Names") #View(MetadataGUT_log)
+
+#### Metabolome data ####
+
+G_log<-read_delim("essai_gut_metabo_norm_log.csv",";", escape_double = FALSE, trim_ws = TRUE) %>% remove_rownames %>% column_to_rownames(var="Names") #View(G_log)
+
+MetadataGUT_log<-read_delim("MetadataGUT_D.csv",";", escape_double = FALSE, trim_ws = TRUE) %>%
+  remove_rownames %>% column_to_rownames(var="Names") #View(MetadataGUT_log)
+```
+
+## METRICS
+##|
+
+This pipeline is based on ordinate object for the microbiome data. This script is dedicated to the PCA ordination method.
+
+Ordinated objects can contain many axis, up to a point where a non-informative % 
+of the remaining ‰ of Explained variance is carried. 
+The "Threshold" variable set the ‰ of Expl. Var you want to work with.
+
+The function used to compute the average distance between two time points can be chosen
+with the "distance_metrics" variable.
+
+```{r}
+Threshold= 0.9
+distance_metrics="median"
+```
+
+```{r}
+if (distance_metrics=="median") {
+  distance_metrics=median
+} else distance_metrics=mean
+```
+
+## MICROBIOME
+
+### PCA
+
+let's begin with the microbiome data. The goal is to obtained a dataframe containing cumulative distances
+for each experimental condition (0 and 100 µg Cha/L here).
+
+To obtain theses distances, an ordination must be performed.
+The ‰ of Expl. Var. and the coordinates of each axis will be stored.
+
+```{r}
+PCAGut_adnmedaka.pca<-pca(Gadn)
+View(PCAGut_adnmedaka.pca$cum.var)
+```
+
+### AXIS NEEDED
+
+The following loop process the number of axis needed to achieved the designated ‰ of Expl. Var. .
+
+```{r}
+ExplVarTot_pcamicrobiome=as.data.frame(PCAGut_adnmedaka.pca$cum.var)[nrow(as.data.frame(PCAGut_adnmedaka.pca$cum.var)),1] #ExplVarTot_pcamicrobiome
+as.data.frame(PCAGut_adnmedaka.pca$cum.var)
+
+if (ExplVarTot_pcamicrobiome < Threshold) {
+  ExplVarTot_pcamicrobiome=0
+  nb_axis_pcamicrobiome=1
+  while (ExplVarTot_pcamicrobiome<Threshold) {
+    nb_axis_pcamicrobiome=nb_axis_pcamicrobiome+1
+    PCAGut_adnmedaka.pca<-pca(Gadn,ncomp=nb_axis_pcamicrobiome)
+    ExplVarTot_pcamicrobiome=as.data.frame(PCAGut_adnmedaka.pca$cum.var)[nrow(as.data.frame(PCAGut_adnmedaka.pca$cum.var)),1]
+    Axis_needed_pcamicrobiome<-nb_axis_pcamicrobiome
+    Axis_needed_end_pcamicrobiome<-nb_axis_pcamicrobiome+2
+  }
+  print(paste(nb_axis_pcamicrobiome,"Axis are needed to explain",ExplVarTot_pcamicrobiome,"of the total variance"))
+  ExplVarTot_pcamicrobiome=0
+  nb_axis_pcamicrobiome=0
+}
+```
+
+### CENTROIDS CORDINATES
+
+In order to compute the distance between each time point, a unique set of coordinates must me associated with each group (Time_treatment here). Centroids can be processed to work out these coordinate. 
+First, we need to create a new data frame containing all coordinates and the metadata needed.
+A reduced dataset can be cretaed by retaining only the necessary axis fixed earlier.
+
+```{r}
+newdf_pcamicrobiome<-data.frame(MetadataGUT_log$Cond2,MetadataGUT_log$Treatment,PCAGut_adnmedaka.pca$variates$X) #View(newdf_pcamicrobiome)
+newdf_pcamicrobiome_split<-split(newdf_pcamicrobiome,f = MetadataGUT_log$Treatment) 
+#View(newdf_pcamicrobiome_split$`0`) 
+#View(newdf_pcamicrobiome_split$`100`)
+```
+
+At this step, the dataset need to be split to compute all the distances for each treatment.
+The variable "Exposure" form the metadata will be used.
+
+```{r}
+newdf_pcamicrobiome_0<-newdf_pcamicrobiome_split$`0` %>% group_by(newdf_pcamicrobiome_split$`0`$MetadataGUT_log.Cond2) %>%
+  dplyr::summarise(across(starts_with("PC"),.fns=distance_metrics)) #View(newdf_pcamicrobiome_0)
+
+newdf_pcamicrobiome_100<-newdf_pcamicrobiome_split$`100` %>% group_by(newdf_pcamicrobiome_split$`100`$MetadataGUT_log.Cond2) %>%
+  dplyr::summarise(across(starts_with("PC"), .fns=distance_metrics)) #View(newdf_pcamicrobiome_100)
+```
+
+The first time point (d0_0) is only associated with the first condition while
+being the starting point of all treatments in the same time.
+It needs to be added to each treatment.
+
+```{r}
+#ajouter le d0_0 au dataframe exposé
+names(newdf_pcamicrobiome_0)[1] <-"Time_Exposure"
+names(newdf_pcamicrobiome_100)[1] <-"Time_Exposure"
+newdf_pcamicrobiome_100<-rbind(newdf_pcamicrobiome_0[1,],newdf_pcamicrobiome_100) #View(newdf_pcamicrobiome_100)
+```
+
+### EUCLIDEAN NORM
+
+The distances can then be processed by computing the euclidean norm between each group for all treatments.
+Let's start with the non-exposed/control samples.
+
+#### df_microbiome_0
+
+Three new columns will be added : 
+  - a name/label for all cumputed-distances
+  - the euclidean norm
+  - the cumulative euclidean norm in %
+
+```{r}
+#col distance_label
+Nlabel_pcamicrobiome=1
+distance_label_pcamicrobiome_0<-as.character(newdf_pcamicrobiome_0[1,1]) #View(distance_label_pcamicrobiome_0)
+while (Nlabel_pcamicrobiome<nrow(newdf_pcamicrobiome_0)) {
+  distance_label2_pcamicrobiome_0<-as.character(paste(newdf_pcamicrobiome_0[Nlabel_pcamicrobiome,1],"_",newdf_pcamicrobiome_0[Nlabel_pcamicrobiome+1,1]))
+  distance_label_pcamicrobiome_0<-c(distance_label_pcamicrobiome_0,distance_label2_pcamicrobiome_0)
+  Nlabel_pcamicrobiome=Nlabel_pcamicrobiome+1
+}
+newdf_pcamicrobiome_0$distance_label<-distance_label_pcamicrobiome_0 #View(newdf_pcamicrobiome_0)
+
+#col euclidean_norm
+euclidean_norm_pcamicrobiome_0<-as.numeric(0) #View(euclidean_norm_pcamicrobiome_0)
+i=2
+while (i<=nrow(newdf_pcamicrobiome_0)) {
+  sum_distance=0
+  for (n in 2:(Axis_needed_pcamicrobiome+1)) {
+    distance_0<-sum((newdf_pcamicrobiome_0[i,n]-newdf_pcamicrobiome_0[i-1,n])^2)
+    sum_distance=sum_distance+distance_0
+  }
+  euclidean_norm_pcamicrobiome_0<-c(euclidean_norm_pcamicrobiome_0,sqrt(sum_distance))
+  print(paste("The total distance",i,"is",sqrt(sum_distance),"For",(n-1),"axis"))
+  i=i+1
+}
+print(euclidean_norm_pcamicrobiome_0)
+newdf_pcamicrobiome_0$euclidean_norm_pcamicrobiome_0<-euclidean_norm_pcamicrobiome_0 #View(newdf_pcamicrobiome_0)
+Axis_needed_pcamicrobiome
+#col cumdistance
+cumdistance_pcamicrobiome_0<-as.numeric(0)
+i=2
+while (i<=nrow(newdf_pcamicrobiome_0)) {
+  distancep_0<-sum(((newdf_pcamicrobiome_0$euclidean_norm_pcamicrobiome_0[i]/sum(euclidean_norm_pcamicrobiome_0))*100)+cumdistance_pcamicrobiome_0[i-1])
+  cumdistance_pcamicrobiome_0<-c(cumdistance_pcamicrobiome_0,distancep_0)
+  i=i+1
+}
+print(cumdistance_pcamicrobiome_0)
+newdf_pcamicrobiome_0$cumdistance_pcamicrobiome_0<-cumdistance_pcamicrobiome_0 #View(newdf_pcamicrobiome_0)
+```
+
+#### df_microbiome_100
+
+Let's perform the same process  to the exposed-samples.
+
+```{r}
+
+#col distance_label
+Nlabel_pcamicrobiome=1
+distance_label_pcamicrobiome_100<-as.character(newdf_pcamicrobiome_100[1,1]) #View(distance_label_pcamicrobiome_100)
+while (Nlabel_pcamicrobiome<nrow(newdf_pcamicrobiome_100)) {
+  distance_label2_pcamicrobiome_100<-as.character(paste(newdf_pcamicrobiome_100[Nlabel_pcamicrobiome,1],"_",newdf_pcamicrobiome_100[Nlabel_pcamicrobiome+1,1]))
+  distance_label_pcamicrobiome_100<-c(distance_label_pcamicrobiome_100,distance_label2_pcamicrobiome_100)
+  Nlabel_pcamicrobiome=Nlabel_pcamicrobiome+1
+}
+newdf_pcamicrobiome_100$distance_label<-distance_label_pcamicrobiome_100 #View(newdf_pcamicrobiome_100)
+
+#col euclidean_norm
+euclidean_norm_pcamicrobiome_100<-as.numeric(0) #View(euclidean_norm_pcamicrobiome_100)
+i=2
+while (i<=nrow(newdf_pcamicrobiome_100)) {
+  sum_distance=0
+  for (n in 2:(Axis_needed_pcamicrobiome+1)) {
+    distance_100<-sum((newdf_pcamicrobiome_100[i,n]-newdf_pcamicrobiome_100[i-1,n])^2)
+    sum_distance=sum_distance+distance_100
+  }
+  euclidean_norm_pcamicrobiome_100<-c(euclidean_norm_pcamicrobiome_100,sqrt(sum_distance))
+  print(paste("The total distance",i,"is",sqrt(sum_distance),"For",(n-1),"axis"))
+  i=i+1
+}
+print(euclidean_norm_pcamicrobiome_100)
+newdf_pcamicrobiome_100$euclidean_norm_pcamicrobiome_100<-euclidean_norm_pcamicrobiome_100 #View(newdf_pcamicrobiome_100)
+
+#col cumdistance
+cumdistance_pcamicrobiome_100<-as.numeric(0)
+i=2
+while (i<=nrow(newdf_pcamicrobiome_100)) {
+  distancep_100<-sum(((newdf_pcamicrobiome_100$euclidean_norm_pcamicrobiome_100[i]/sum(euclidean_norm_pcamicrobiome_100))*100)+cumdistance_pcamicrobiome_100[i-1])
+  cumdistance_pcamicrobiome_100<-c(cumdistance_pcamicrobiome_100,distancep_100)
+  i=i+1
+}
+print(cumdistance_pcamicrobiome_100)
+newdf_pcamicrobiome_100$cumdistance_pcamicrobiome_100<-cumdistance_pcamicrobiome_100 #View(newdf_pcamicrobiome_100)
+
+```
+##|
+## METABOLOME
+
+The same process will be applied to the metabolome data. 
+The code is only adapted for mixOmics-friendly data.
+
+### PCA
+
+```{r}
+PCAGut_logmedaka.pca<-pca(G_log) #View(PCAGut_logmedaka.pca$variates$X)
+```
+
+### AXIS NEEDED
+
+Let's determined the number of Axis needed downstream. 
+
+```{r}
+ExplVarTot_metabo=as.data.frame(PCAGut_logmedaka.pca$cum.var)[nrow(as.data.frame(PCAGut_logmedaka.pca$cum.var)),1] #View(ExplVarTot_metabo)
+
+if (ExplVarTot_metabo<Threshold) {
+  ExplVarTot_metabo=0
+  nb_axis_metabo=1
+  while (ExplVarTot_metabo<Threshold) {
+    nb_axis_metabo=nb_axis_metabo+1
+    PCAGut_logmedaka.pca<-pca(G_log,ncomp=nb_axis_metabo)
+    ExplVarTot_metabo=as.data.frame(PCAGut_logmedaka.pca$cum.var)[nrow(as.data.frame(PCAGut_logmedaka.pca$cum.var)),1]
+    Axis_needed_metabo<-nb_axis_metabo
+    Axis_needed_end_metabo<-nb_axis_metabo+2
+  }
+  print(paste(nb_axis_metabo,"Axis are needed to explain",ExplVarTot_metabo,"of the total variance"))
+  ExplVarTot_metabo=0
+  nb_axis_metabo=0
+}
+```
+
+### CENTROIDS CORDINATES
+
+Make a new data frame containing all coordinates and the metadata needed and
+split the dataset according to condition.
+A reduced dataset can be created by retaining only the necessary axis fixed earlier.
+
+```{r}
+newdf_metabo<-data.frame(MetadataGUT_log$Cond2,MetadataGUT_log$Treatment,PCAGut_logmedaka.pca$variates$X) #View(newdf_metabo)
+newdf_metabo_split<-split(newdf_metabo,f = MetadataGUT_log$Treatment) 
+#View(newdf_metabo_split$`0`) 
+#View(newdf_metabo_split$`100`)
+
+newdf_metabo_0<-newdf_metabo_split$`0` %>% group_by(newdf_metabo_split$`0`$MetadataGUT_log.Cond2) %>%
+  dplyr::summarise(across(starts_with("PC"),.fns=distance_metrics)) #View(newdf_metabo_0)
+
+newdf_metabo_100<-newdf_metabo_split$`100` %>% group_by(newdf_metabo_split$`100`$MetadataGUT_log.Cond2) %>%
+  dplyr::summarise(across(starts_with("PC"),.fns=distance_metrics)) #View(newdf_metabo_100)
+
+#ajouter le d0_0 au dataframe exposé
+names(newdf_metabo_0)[1] <-"Time_Exposure"
+names(newdf_metabo_100)[1] <-"Time_Exposure"
+newdf_metabo_100<-rbind(newdf_metabo_0[1,],newdf_metabo_100) #View(newdf_metabo_100)
+```
+
+### EUCLIDEAN NORM
+
+The distances can then be processed by computing the euclidean norm between each group for all treatemnts.
+Let's start with the non-exposed/control samples.
+
+#### df_metabo_0
+
+Three new columns will be added : 
+  - a name/label for all cumputed-distances
+  - the euclidean norm
+  - the cumulative euclidean norm in %
+
+```{r}
+#col distance_label
+Nlabel_metabo=1
+distance_label_metabo_0<-as.character(newdf_metabo_0[1,1]) #View(distance_label_metabo_0)
+while (Nlabel_metabo<nrow(newdf_metabo_0)) {
+  distance_label2_metabo_0<-as.character(paste(newdf_metabo_0[Nlabel_metabo,1],"_",newdf_metabo_0[Nlabel_metabo+1,1]))
+  distance_label_metabo_0<-c(distance_label_metabo_0,distance_label2_metabo_0)
+  Nlabel_metabo=Nlabel_metabo+1
+}
+newdf_metabo_0$distance_label<-distance_label_metabo_0 #View(newdf_metabo_0)
+
+#col euclidean_norm
+euclidean_norm_metabo_0<-as.numeric(0) #View(euclidean_norm_metabo_0)
+i=2
+while (i<=nrow(newdf_metabo_0)) {
+  sum_distance=0
+  for (n in 2:(Axis_needed_metabo+1)) {
+    distance_0<-sum((newdf_metabo_0[i,n]-newdf_metabo_0[i-1,n])^2)
+    sum_distance=sum_distance+distance_0
+  }
+  euclidean_norm_metabo_0<-c(euclidean_norm_metabo_0,sqrt(sum_distance))
+  print(paste("The total distance",i,"is",sqrt(sum_distance),"For",(n-1),"axis"))
+  i=i+1
+}
+print(euclidean_norm_metabo_0)
+newdf_metabo_0$euclidean_norm_metabolome_0<-euclidean_norm_metabo_0 #View(newdf_metabo_0)
+
+#col cumdistance
+cumdistance_metabo_0<-as.numeric(0)
+i=2
+while (i<=nrow(newdf_metabo_0)) {
+  distancep_0<-sum(((newdf_metabo_0$euclidean_norm_metabolome_0[i]/sum(euclidean_norm_metabo_0))*100)+cumdistance_metabo_0[i-1])
+  cumdistance_metabo_0<-c(cumdistance_metabo_0,distancep_0)
+  i=i+1
+}
+print(cumdistance_metabo_0)
+newdf_metabo_0$cumdistance_metabolome_0<-cumdistance_metabo_0 #View(newdf_metabo_0)
+```
+
+#### df_metabo_100
+
+Let's perform the same process  to the exposed-samples.
+
+```{r}
+#col distance_label
+Nlabel_metabo=1
+distance_label_metabo_100<-as.character(newdf_metabo_100[1,1]) #View(distance_label_metabo_100)
+while (Nlabel_metabo<nrow(newdf_metabo_100)) {
+  distance_label2_metabo_100<-as.character(paste(newdf_metabo_100[Nlabel_metabo,1],"_",newdf_metabo_100[Nlabel_metabo+1,1]))
+  distance_label_metabo_100<-c(distance_label_metabo_100,distance_label2_metabo_100)
+  Nlabel_metabo=Nlabel_metabo+1
+}
+newdf_metabo_100$distance_label<-distance_label_metabo_100 #View(newdf_metabo_100)
+
+#col euclidean_norm
+euclidean_norm_metabo_100<-as.numeric(0) #View(euclidean_norm_metabo_100)
+i=2
+while (i<=nrow(newdf_metabo_100)) {
+  sum_distance=0
+  for (n in 2:(Axis_needed_metabo+1)) {
+    distance_100<-sum((newdf_metabo_100[i,n]-newdf_metabo_100[i-1,n])^2)
+    sum_distance=sum_distance+distance_100
+  }
+  euclidean_norm_metabo_100<-c(euclidean_norm_metabo_100,sqrt(sum_distance))
+  print(paste("The total distance",i,"is",sqrt(sum_distance),"For",(n-1),"axis"))
+  i=i+1
+}
+print(euclidean_norm_metabo_100)
+newdf_metabo_100$euclidean_norm_metabolome_100<-euclidean_norm_metabo_100 #View(newdf_metabo_100)
+
+#col cumdistance
+cumdistance_metabo_100<-as.numeric(0)
+i=2
+while (i<=nrow(newdf_metabo_100)) {
+  distancep_100<-sum(((newdf_metabo_100$euclidean_norm_metabolome_100[i]/sum(euclidean_norm_metabo_100))*100)+cumdistance_metabo_100[i-1])
+  cumdistance_metabo_100<-c(cumdistance_metabo_100,distancep_100)
+  i=i+1
+}
+print(cumdistance_metabo_100)
+newdf_metabo_100$cumdistance_metabolome_100<-cumdistance_metabo_100 #View(newdf_metabo_100)
+```
+##|
+## GRAPHICAL OUTPUT
+
+#### add linear + caption
+
+All necessary data are now acquired.
+All the cumulative distances will be stored in a new dataframe and a few new columns
+will be added for the graphical output.
+
+```{r}
+#col Time_label
+time_label<-str_sub(newdf_pcamicrobiome_0$Time_Exposure,1,nchar(newdf_pcamicrobiome_0$Time_Exposure)-2)
+
+newdf_cumdistance_all<-tibble(time_label,newdf_pcamicrobiome_0$cumdistance_pcamicrobiome_0,
+                              newdf_pcamicrobiome_100$cumdistance_pcamicrobiome_100,
+                              newdf_metabo_0$cumdistance_metabolome_0,
+                              newdf_metabo_100$cumdistance_metabolome_100)
+
+#col cumdistance_linear
+time_point<-str_sub(newdf_pcamicrobiome_0$Time_Exposure,2,nchar(newdf_pcamicrobiome_0$Time_Exposure)-1)
+time_point<-(str_sub(time_point,1,nchar(time_point)-1))
+time_point<-as.numeric(time_point) #View(newdf_cumdistance_all)
+
+#cumdistance_linear=NULL
+nb_timepoint=nrow(newdf_cumdistance_all)
+cumdistance_linear<-as.numeric(lapply(time_point,FUN=function(x) x*(100/nb_timepoint))) #View(cumdistance_linear)
+newdf_cumdistance_all$cumdistance_linear<-cumdistance_linear 
+#View(newdf_cumdistance_all)
+
+distance_metrics_l_2PCA=as.list(distance_metrics)
+parameters_2PCA<-paste(c("Microbiota = PCA-Eucl. ; Metabolome = PCA-Eucl. ;",
+                    "\n\ndistance_metrics = ",
+                    distance_metrics %>% as.list() %>%
+                      .[[length(.)]] %>% .[[2]],
+        " ; % of Expl. Var. = ",Threshold),collapse = "")
+```
+
+Here is the last final step : the ggplot code !
+
+#### ggplot + pdf
+
+```{r}
+pdf(file=paste("Fig_Trajectory_","PCA-Eucl&PCA-Eucl_",
+               distance_metrics %>% as.list() %>%
+                 .[[length(.)]] %>% .[[2]]
+               ,"_",Threshold,".pdf",sep="",collapse=NULL),
+    width = 8.5, # The width of the plot in inches
+    height = 6) # The height of the plot in inches
+
+Fig_Trajectory_2PCA<-ggplot(newdf_cumdistance_all,
+  aes(x=cumdistance_linear,y=cumdistance_linear))+
+  geom_line(color="grey",size=1.5,linetype="dashed")+
+  geom_line(aes(x=newdf_pcamicrobiome_0$cumdistance_pcamicrobiome_0,
+                y=newdf_metabo_0$cumdistance_metabolome_0),color="blue",size=1)+
+  geom_point(aes(x=newdf_pcamicrobiome_0$cumdistance_pcamicrobiome_0,
+                 y=newdf_metabo_0$cumdistance_metabolome_0),
+             shape=21,color="black",fill="#CBD5E8",size=3)+
+  geom_label(aes(x=newdf_pcamicrobiome_0$cumdistance_pcamicrobiome_0,
+                 y=newdf_metabo_0$cumdistance_metabolome_0,label=time_label),
+             nudge_y=3,nudge_x=-4,size=5,color="white",fill="#80B1D3")+
+  geom_line(aes(x=newdf_pcamicrobiome_100$cumdistance_pcamicrobiome_100,
+                y=newdf_metabo_100$cumdistance_metabolome_100),color="#4DAF4A",size=1)+
+  geom_point(aes(x=newdf_pcamicrobiome_100$cumdistance_pcamicrobiome_100,
+                 y=newdf_metabo_100$cumdistance_metabolome_100),
+             shape=21,color="black",fill="#CBD5E8",size=3.5)+
+  geom_label(aes(x=newdf_pcamicrobiome_100$cumdistance_pcamicrobiome_100,
+                 y=newdf_metabo_100$cumdistance_metabolome_100,label=time_label),
+                nudge_y=3,nudge_x=-4,size=5,color="white",fill="darkgreen")+
+  theme_bw()+expand_limits(y=c(0,100))+theme(aspect.ratio=1)+
+  theme(plot.title=element_text(hjust = 0.5),plot.caption = element_text(hjust=0.5,size = 13),
+        axis.text=element_text(size=16),axis.title=element_text(size=18))+
+  labs(x="\nGut microbiota Kinetics\n",y="Gut metabolome Kinetics \n",caption=parameters_2PCA)
+
+print(Fig_Trajectory_2PCA)
+dev.off()
+```
+
+Thanks for reading !
+
+##_________________________________________________________________________________________________
